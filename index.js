@@ -11,6 +11,9 @@ const apiId = parseInt(process.env.API_ID, 10)
 const apiHash = process.env.API_HASH;
 let stringSession = process.env.STRING_SESSION || "";
 
+console.log("STRING_SESSION загружен?", process.env.STRING_SESSION?.slice(0, 15), "длина:", process.env.STRING_SESSION?.length);
+
+
 const targetGroupName = process.env.TARGET_GROUP_NAME; // пример: ORDERS
 const logGroupTitle = process.env.LOG_GROUP_TITLE;     // пример: Reklama (или можно дать ID)
 const keywords = process.env.KEYWORDS ? process.env.KEYWORDS.split(",") : [];
