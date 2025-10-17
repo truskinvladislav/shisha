@@ -3,23 +3,22 @@ const { TelegramClient } = require("telegram");
 const { StringSession } = require("telegram/sessions");
 const input = require("input");
 
-// Парсим параметры из .env
 const apiId = parseInt(process.env.API_ID, 10);
 const apiHash = process.env.API_HASH;
 let stringSession = process.env.STRING_SESSION || "";
 
-const logGroupTitle = process.env.LOG_GROUP_TITLE;     // куда логировать
-const rawFolder = process.env.TARGET_FOLDER_ID;        // id папки с группами для рекламы
+const logGroupTitle = process.env.LOG_GROUP_TITLE;
+const rawFolder = process.env.TARGET_FOLDER_ID;
 const targetFolderId = rawFolder ? parseInt(rawFolder, 10) : null;
 
 if (!apiId || !apiHash) {
-    console.error('Отсутствуют API_ID или API_HASH в .env');
+    console.error('❌ Отсутствуют API_ID или API_HASH в .env');
     process.exit(1);
 }
 
 const client = new TelegramClient(new StringSession(stringSession), apiId, apiHash, { connectionRetries: 5 });
 
-let resolvedLogPeer = null; // id группы для логов
+let resolvedLogPeer = null;
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -27,9 +26,7 @@ function sleep(ms) {
 
 async function resolveDialogPeer(identifier) {
     if (!identifier) return null;
-    if (/^-?\d+$/.test(String(identifier).trim())) {
-        return Number(identifier);
-    }
+    if (/^-?\d+$/.test(String(identifier).trim())) return Number(identifier);
     const dialogs = await client.getDialogs();
     const found = dialogs.find(d => d.title === identifier || d.username === identifier || String(d.id) === identifier);
     return found ? found.id : null;
@@ -38,9 +35,9 @@ async function resolveDialogPeer(identifier) {
 async function sendToGroup(groupIdentifier, text) {
     try {
         let peer = groupIdentifier;
-
-        if (groupIdentifier === logGroupTitle && resolvedLogPeer) peer = resolvedLogPeer;
-        else if (typeof groupIdentifier === "string" && /^-?\d+$/.test(groupIdentifier.trim())) {
+        if (groupIdentifier === logGroupTitle && resolvedLogPeer) {
+            peer = resolvedLogPeer;
+        } else if (typeof groupIdentifier === "string" && /^-?\d+$/.test(groupIdentifier.trim())) {
             peer = Number(groupIdentifier);
         } else if (typeof groupIdentifier === "string") {
             const dialogs = await client.getDialogs();
@@ -54,40 +51,53 @@ async function sendToGroup(groupIdentifier, text) {
     }
 }
 
-// Основная функция рассылки рекламы из Избранного в группы из папки TARGET_FOLDER_ID
-async function broadcastFromMe() {
-    let sentGroupIds = new Set(); // Храним, куда уже отправили в этом цикле
+async function logError(context, error) {
+    const message = `❌ Ошибка в: ${context}\n\n${error?.message || error}\nКод ошибки: ${error?.errorMessage || "N/A"}`;
+    console.error(message);
+    if (resolvedLogPeer) {
+        await sendToGroup(resolvedLogPeer, message);
+    }
+}
 
+// Храним текущий прогресс
+let sentGroupIds = new Set();
+
+async function broadcastFromMe() {
     while (true) {
         try {
             const dialogs = await client.getDialogs();
-            const groups = dialogs.filter(d => (d.isGroup || d.isChannel) && d.folderId === targetFolderId);
+            let groups = dialogs.filter(d => (d.isGroup || d.isChannel) && d.folderId === targetFolderId);
+
+            // Удаление дубликатов по ID
+            const uniqueMap = new Map();
+            groups.forEach(g => uniqueMap.set(g.id, g));
+            groups = Array.from(uniqueMap.values());
 
             if (!groups.length) {
-                console.log("⚠ Нет групп в папке TARGET_FOLDER_ID");
+                await logError("broadcastFromMe", "⚠ Нет групп в папке TARGET_FOLDER_ID");
                 await sleep(60000);
                 continue;
             }
 
-            // Получаем только те, куда еще не отправляли
-            const unsentGroups = groups.filter(group => !sentGroupIds.has(group.id));
-
-            // Если все группы уже использованы — начинаем заново
-            if (unsentGroups.length === 0) {
-                console.log("🔄 Все группы пройдены, начинаем заново...");
-                sentGroupIds.clear();
-                await sleep(5000); // небольшая пауза перед новым циклом
-                continue;
-            }
-
-            const group = unsentGroups[0]; // берём первую ещё неиспользованную группу
-
+            // Получаем последнее сообщение
             const lastMessage = (await client.getMessages("me", { limit: 1 }))[0];
             if (!lastMessage) {
-                console.log("⚠ Нет сообщений в Избранном");
+                await logError("broadcastFromMe", "⚠ Нет сообщений в Избранном");
                 await sleep(60000);
                 continue;
             }
+
+            // Фильтруем те, в которые ещё не отправляли в этом цикле
+            const unsentGroups = groups.filter(group => !sentGroupIds.has(group.id.toString()));
+
+            if (unsentGroups.length === 0) {
+                console.log("🔁 Все группы обработаны. Начинаем новый круг...");
+                sentGroupIds.clear();
+                await sleep(5000);
+                continue;
+            }
+
+            const group = unsentGroups[0];
 
             try {
                 const forwardedArr = await client.forwardMessages(group.entity, {
@@ -96,56 +106,35 @@ async function broadcastFromMe() {
                 });
 
                 const forwarded = Array.isArray(forwardedArr) ? forwardedArr[0] : forwardedArr;
-                const msgIdToDelete = forwarded?.id;
 
-                let groupLink;
-                if (group.username) {
-                    groupLink = `https://t.me/${group.username}`;
-                } else if (group.id) {
-                    groupLink = `ID группы: ${group.id}`;
-                } else {
-                    groupLink = "[не удалось определить ссылку]";
-                }
+                let groupLink = group.username
+                    ? `https://t.me/${group.username}`
+                    : `ID группы: ${group.id}`;
 
                 const logText = `✅ Переслано сообщение в "${group.title}"\n${groupLink}\n🆔 ID сообщения: ${lastMessage.id}`;
+                await sendToGroup(resolvedLogPeer, logText);
 
-                if (resolvedLogPeer) await sendToGroup(resolvedLogPeer, logText);
-                else await sendToGroup(logGroupTitle, logText);
+                sentGroupIds.add(group.id.toString());
 
-                // Помечаем эту группу как уже использованную
-                sentGroupIds.add(group.id);
-
-                // Удаляем сообщение через 60 секунд
-                if (msgIdToDelete) {
-                    setTimeout(async () => {
-                        try {
-                            await client.deleteMessages(group.id, [msgIdToDelete]);
-                            console.log(`🗑 Сообщение удалено из "${group.title}"`);
-                        } catch (err) {
-                            console.error(`Ошибка удаления сообщения из "${group.title}":`, err);
-                        }
-                    }, 60 * 1000);
-                }
             } catch (err) {
-                console.error(`Ошибка пересылки в "${group.title}":`, err);
+                await logError(`пересылке в "${group.title}"`, err);
                 try {
                     await client.sendMessage(group.id, { message: lastMessage.message });
-                    sentGroupIds.add(group.id); // даже если вручную — пометили как "отправлено"
+                    sentGroupIds.add(group.id.toString());
                 } catch (sendErr) {
-                    console.error(`Не удалось вручную отправить сообщение в "${group.title}":`, sendErr);
+                    await logError(`ручной отправке в "${group.title}"`, sendErr);
                 }
             }
 
-            console.log("⏱ Жду 3 минуты до следующей группы...");
+            console.log(`⏱ Жду 3 минуты до следующей группы...`);
             await sleep(3 * 60 * 1000);
 
         } catch (err) {
-            console.error("Ошибка в broadcastFromMe:", err);
+            await logError("broadcastFromMe", err);
             await sleep(20000);
         }
     }
 }
-
 
 async function startClient() {
     if (!stringSession || stringSession.trim() === "") {
@@ -165,8 +154,11 @@ async function startClient() {
 
     if (logGroupTitle) {
         resolvedLogPeer = await resolveDialogPeer(logGroupTitle);
-        if (resolvedLogPeer) console.log("🔎 LOG_GROUP_TITLE резолвлен в id:", resolvedLogPeer);
-        else console.warn("⚠ LOG_GROUP_TITLE не найден по title/username. Можно указать ID в LOG_GROUP_TITLE в .env");
+        if (resolvedLogPeer) {
+            console.log("🔎 LOG_GROUP_TITLE резолвлен в id:", resolvedLogPeer);
+        } else {
+            console.warn("⚠ LOG_GROUP_TITLE не найден. Укажи ID или точное имя в .env");
+        }
     }
 }
 
@@ -174,5 +166,3 @@ async function startClient() {
     await startClient();
     broadcastFromMe();
 })();
-
-
