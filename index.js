@@ -56,7 +56,7 @@ async function sendToGroup(groupIdentifier, text) {
 
 // Основная функция рассылки рекламы из Избранного в группы из папки TARGET_FOLDER_ID
 async function broadcastFromMe() {
-    let currentIndex = 0;
+    let sentGroupIds = new Set(); // Храним, куда уже отправили в этом цикле
 
     while (true) {
         try {
@@ -69,14 +69,25 @@ async function broadcastFromMe() {
                 continue;
             }
 
+            // Получаем только те, куда еще не отправляли
+            const unsentGroups = groups.filter(group => !sentGroupIds.has(group.id));
+
+            // Если все группы уже использованы — начинаем заново
+            if (unsentGroups.length === 0) {
+                console.log("🔄 Все группы пройдены, начинаем заново...");
+                sentGroupIds.clear();
+                await sleep(5000); // небольшая пауза перед новым циклом
+                continue;
+            }
+
+            const group = unsentGroups[0]; // берём первую ещё неиспользованную группу
+
             const lastMessage = (await client.getMessages("me", { limit: 1 }))[0];
             if (!lastMessage) {
                 console.log("⚠ Нет сообщений в Избранном");
                 await sleep(60000);
                 continue;
             }
-
-            const group = groups[currentIndex % groups.length];
 
             try {
                 const forwardedArr = await client.forwardMessages(group.entity, {
@@ -98,10 +109,13 @@ async function broadcastFromMe() {
 
                 const logText = `✅ Переслано сообщение в "${group.title}"\n${groupLink}\n🆔 ID сообщения: ${lastMessage.id}`;
 
-
                 if (resolvedLogPeer) await sendToGroup(resolvedLogPeer, logText);
                 else await sendToGroup(logGroupTitle, logText);
 
+                // Помечаем эту группу как уже использованную
+                sentGroupIds.add(group.id);
+
+                // Удаляем сообщение через 60 секунд
                 if (msgIdToDelete) {
                     setTimeout(async () => {
                         try {
@@ -114,20 +128,24 @@ async function broadcastFromMe() {
                 }
             } catch (err) {
                 console.error(`Ошибка пересылки в "${group.title}":`, err);
-                if (lastMessage.message) {
+                try {
                     await client.sendMessage(group.id, { message: lastMessage.message });
+                    sentGroupIds.add(group.id); // даже если вручную — пометили как "отправлено"
+                } catch (sendErr) {
+                    console.error(`Не удалось вручную отправить сообщение в "${group.title}":`, sendErr);
                 }
             }
 
-            currentIndex++;
             console.log("⏱ Жду 3 минуты до следующей группы...");
             await sleep(3 * 60 * 1000);
+
         } catch (err) {
             console.error("Ошибка в broadcastFromMe:", err);
             await sleep(20000);
         }
     }
 }
+
 
 async function startClient() {
     if (!stringSession || stringSession.trim() === "") {
